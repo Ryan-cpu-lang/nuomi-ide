@@ -16,7 +16,8 @@
       <span class="sep"></span>
       <button id="btnRun" class="run" title="解释器运行 (F5)">▶ 运行</button>
       <button id="btnCompile" class="run2" title="编译为 NUC 并运行">⚙ 编译运行</button>
-      <button id="btnPack" class="run3" title="打包为 NUP 安装包（预览版）">📦 导出 .nup</button>
+      <button id="btnPack" class="run3" title="打包为 NUP 安装包（预览版，支持多文件）">📦 导出 .nup</button>
+      <button id="btnOpenExport" class="run4" title="在资源管理器打开导出文件夹">📂 导出文件夹</button>
       <span class="sep"></span>
       <button id="btnTheme" title="切换主题">🌓 主题</button>
       <button id="btnReset" title="重启 REPL">↻ REPL</button>
@@ -70,6 +71,24 @@
     <span class="grow"></span>
     <span id="stMsg">就绪</span>
   </footer>
+
+<!-- 导出 .nup 弹窗（多文件选择，预览版） -->
+<div id="packModal" class="modal" hidden>
+  <div class="modal-card">
+    <div class="modal-head">📦 导出 .nup（预览版）</div>
+    <div class="modal-body">
+      <label class="field">包名（package name）
+        <input id="packName" class="text-input" placeholder="例如 my-app" autocomplete="off">
+      </label>
+      <div class="field-label">选择要打包的 .nuomi 程序（可多选）：</div>
+      <div id="packFileList" class="check-list"><div class="hint">正在读取工作区…</div></div>
+    </div>
+    <div class="modal-foot">
+      <button id="packCancel" class="mini">取消</button>
+      <button id="packDo" class="run3">📦 打包</button>
+    </div>
+  </div>
+</div>
 
 <script src="/app.js"></script>
 </body>

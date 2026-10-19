@@ -49,7 +49,7 @@ const replLog = $('replLog');
 const replInput = $('replInput');
 
 // ---------- 状态 ----------
-let state = { path: null, name: '未命名', dirty: false, busy: false };
+let state = { path: null, name: '未命名', dirty: false, busy: false, lastExport: null };
 
 // ---------- 编辑器 ----------
 function render() {
@@ -218,52 +218,109 @@ function renderRun(r, label) {
   return h;
 }
 
-// ---------- 导出 .nup（预览版） ----------
-async function packNup() {
-  if (!state.path) { if (!await saveFile(true)) return; }
-  else if (state.dirty) await saveFile(false);
-  if (state.busy) return;
-  state.busy = true; $('btnPack').disabled = true;
-  setStatus('正在打包 .nup…'); showPanel('output');
+// ---------- 导出 .nup（预览版，支持多文件） ----------
+function collectNuomi(nodes, out) {
+  for (const n of (nodes || [])) {
+    if (n.isDir) collectNuomi(n.children, out);
+    else if (n.name.endsWith('.nuomi')) out.push(n.rel);
+  }
+  return out;
+}
+
+function openPackModal() {
+  const modal = $('packModal');
+  const list = $('packFileList');
+  list.innerHTML = '<div class="hint">正在读取工作区…</div>';
+  $('packName').value = state.path && state.path.endsWith('.nuomi')
+    ? pathBasename(state.path, '.nuomi') : 'my-app';
+  modal.hidden = false;
+  api('/api/tree').then((data) => {
+    if (!data.ok) { list.innerHTML = '<div class="hint">读取失败</div>'; return; }
+    const files = collectNuomi(data.tree, []);
+    if (!files.length) { list.innerHTML = '<div class="hint">工作区没有 .nuomi 文件</div>'; return; }
+    list.innerHTML = '';
+    for (const f of files) {
+      const label = document.createElement('label');
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.value = f;
+      if (f === state.path) cb.checked = true;
+      label.appendChild(cb);
+      label.appendChild(document.createTextNode(' ' + f));
+      list.appendChild(label);
+    }
+    if (!files.includes(state.path) && files.length) {
+      list.querySelector('input').checked = true;
+    }
+  });
+}
+function pathBasename(p, ext) {
+  const b = p.split(/[\\/]/).pop();
+  return ext && b.endsWith(ext) ? b.slice(0, -ext.length) : b;
+}
+
+async function doPack() {
+  const modal = $('packModal');
+  const checked = Array.from($('packFileList').querySelectorAll('input:checked')).map((c) => c.value);
+  if (!checked.length) { alert('请至少勾选一个 .nuomi 文件'); return; }
+  $('packDo').disabled = true;
   try {
     const r = await api('/api/pack-nup', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: state.path })
+      body: JSON.stringify({ files: checked, name: $('packName').value.trim() })
     });
     if (!r.ok) {
       let html = '<span class="err">打包失败：' + esc(r.error || '') + '</span>\n';
-      if (r.compile) html += renderRun(r.compile, 'compile');
+      if (r.compile) html += renderRun(r.compile, 'compile') + '（文件：' + esc(r.file || '') + '）\n';
+      if (r.stage === 'compile') showPanel('output');
       outputEl.innerHTML = html;
       setStatus('打包失败', true);
-    } else {
-      const ins = await api('/api/inspect-nup', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: r.path })
-      });
-      let html = '📦 <b>已导出 ' + esc(r.path) + '（' + r.size + ' 字节）</b>\n';
-      html += '<span class="warn">⚠ ' + esc(r.note) + '</span>\n\n';
-      if (ins.ok) {
-        const i = ins.info;
-        html += '校验回读：\n';
-        html += '  魔数: ' + i.magic + '\n';
-        html += '  包名: ' + esc(i.packageName) + '\n';
-        html += '  版本: ' + i.version + '  标志(store=0): ' + i.flags + '\n';
-        html += '  文件数: ' + i.fileCount + '  总大小: ' + i.totalUncompressed + ' B\n';
-        for (const e of i.entries) {
-          html += '    • ' + esc(e.pathStr) + '  (' + e.fileSize + ' B, ' + (e.dataValid ? '数据完整' : '数据越界') + ')\n';
-        }
-        html += '\n  Manifest:\n' + escapeHtml(i.manifest);
-      } else {
-        html += '<span class="err">回读失败：' + esc(ins.error) + '</span>\n';
-      }
-      outputEl.innerHTML = html;
-      setStatus('已导出 ' + r.path);
+      return;
     }
+    state.lastExport = r.path;
+    const ins = await api('/api/inspect-nup', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: r.path })
+    });
+    let html = '📦 <b>已导出 ' + esc(r.path) + '（' + r.size + ' 字节，' + (r.fileCount || 1) + ' 个程序）</b>\n';
+    html += '<span class="warn">⚠ ' + esc(r.note) + '</span>\n\n';
+    if (ins.ok) {
+      const i = ins.info;
+      html += '校验回读：\n';
+      html += '  魔数: ' + i.magic + '\n';
+      html += '  包名: ' + esc(i.packageName) + '\n';
+      html += '  版本: ' + i.version + '  标志(store=0): ' + i.flags + '\n';
+      html += '  文件数: ' + i.fileCount + '  总大小: ' + i.totalUncompressed + ' B\n';
+      for (const e of i.entries) {
+        html += '    • ' + esc(e.pathStr) + '  (' + e.fileSize + ' B, ' + (e.dataValid ? '数据完整' : '数据越界') + ')\n';
+      }
+      html += '\n  Manifest:\n' + escapeHtml(i.manifest);
+    } else {
+      html += '<span class="err">回读失败：' + esc(ins.error) + '</span>\n';
+    }
+    showPanel('output');
+    outputEl.innerHTML = html;
+    setStatus('已导出 ' + r.path + '（' + (r.fileCount || 1) + ' 个文件）');
+    modal.hidden = true;
   } catch (e) {
     outputEl.innerHTML = '<span class="err">请求错误：' + esc(String(e)) + '</span>';
     setStatus('出错', true);
   } finally {
-    state.busy = false; $('btnPack').disabled = false;
+    $('packDo').disabled = false;
+  }
+}
+
+async function openExportFolder() {
+  const target = state.lastExport || '';
+  try {
+    const r = await api('/api/open-folder', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: target })
+    });
+    if (!r.ok) setStatus('无法打开文件夹：' + (r.error || ''), true);
+    else setStatus('已打开文件夹：' + r.dir);
+  } catch (e) {
+    setStatus('打开文件夹出错', true);
   }
 }
 
@@ -329,7 +386,11 @@ $('btnSave').addEventListener('click', () => saveFile(false));
 $('btnSaveAs').addEventListener('click', () => saveFile(true));
 $('btnRun').addEventListener('click', () => run('interpret'));
 $('btnCompile').addEventListener('click', () => run('compile'));
-$('btnPack').addEventListener('click', packNup);
+$('btnPack').addEventListener('click', openPackModal);
+$('btnOpenExport').addEventListener('click', openExportFolder);
+$('packDo').addEventListener('click', doPack);
+$('packCancel').addEventListener('click', () => { $('packModal').hidden = true; });
+$('packModal').addEventListener('click', (e) => { if (e.target === $('packModal')) $('packModal').hidden = true; });
 $('btnTheme').addEventListener('click', () => {
   const b = document.body;
   b.dataset.theme = b.dataset.theme === 'dark' ? 'light' : 'dark';

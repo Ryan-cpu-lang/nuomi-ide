@@ -10,6 +10,9 @@
  *   - POST /api/run     运行/编译运行 {path, mode:'interpret'|'compile'}
  *   - POST /api/repl    持久 REPL 交互 {line}
  *   - POST /api/repl/reset  重启 REPL
+ *   - POST /api/pack-nup 打包为 NUP 安装包（预览版）{files:[...]|path, name?}
+ *   - POST /api/inspect-nup 回读校验 NUP {path}
+ *   - POST /api/open-folder 在文件管理器打开目录 {path?}
  * 仅用 Node 内置模块，无需 npm install。
  */
 'use strict';
@@ -182,38 +185,54 @@ function serveStatic(req, res, urlPath) {
   });
 }
 
-// ---------- NUP 打包（草案预览版） ----------
+// ---------- NUP 打包（草案预览版，支持多文件） ----------
 // ⚠ 说明：NUP 规范当前存在两个 P0 问题（header 64 vs 88、魔数字节序反了），
 // 此处按「核对清单建议的修正草案」实现：64 字节头部 + 正确魔数 "NUP!"(0x2150554E) +
 // store-only（不压缩、不签名）。等 liam 修复 P0 定稿后，本函数应同步对齐正式规范。
-function packNup(srcRel, payloadBuf, pkgName) {
-  const pathStr = srcRel.replace(/\.nuomi$/i, '.nuc');
-  const pathBytes = Buffer.from(pathStr, 'utf8');
-  const manifest =
-    '[Package]\n' +
-    'name=' + pkgName + '\n' +
-    'version=1.0\n' +
-    'entry=' + pathStr + '\n' +
-    '[Files]\n' +
-    pathStr + '=' + pathStr + '\n';
+// entries: [{ pathStr: 'a.nuc', payload: <Buffer> }, ...]
+function packNup(entries, pkgName) {
+  if (!entries.length) throw new Error('没有可打包的条目');
+
+  // ---- Manifest ----
+  let manifest = '[Package]\n';
+  manifest += 'name=' + pkgName + '\n';
+  manifest += 'version=1.0\n';
+  manifest += 'entry=' + (entries[0] ? entries[0].pathStr : '') + '\n';
+  manifest += '[Files]\n';
+  for (const e of entries) manifest += e.pathStr + '=' + e.pathStr + '\n';
   const manifestBuf = Buffer.from(manifest, 'utf8');
 
+  // ---- 布局：header(64) | manifest | file_table(N*16) | 路径区 | 数据区 ----
   const headerSize = 64;
   const manifestOffset = headerSize;
   const manifestLen = manifestBuf.length;
   const fileTableOffset = manifestOffset + manifestLen;
-  const fileTableSize = 16;                  // 固定 1 个条目
+  const fileTableSize = 16 * entries.length;
   const pathRegionOffset = fileTableOffset + fileTableSize;
-  const dataOffset = pathRegionOffset + pathBytes.length + 1; // +1 = null 结尾
 
-  const entry = Buffer.alloc(16);
-  entry.writeUInt32LE(dataOffset, 0);          // file_offset
-  entry.writeUInt32LE(payloadBuf.length, 4);   // file_size
-  entry.writeUInt32LE(payloadBuf.length, 8);   // original_size
-  entry.writeUInt16LE(pathBytes.length, 12);   // path_len（不含 null）
-  entry.writeUInt8(0, 14);                     // compress_type = 0 (store)
-  entry.writeUInt8(0, 15);                     // reserved
+  // 路径区：每个 path + null
+  const pathBytesList = entries.map((e) => Buffer.from(e.pathStr, 'utf8'));
+  let pathRegionSize = 0;
+  for (const pb of pathBytesList) pathRegionSize += pb.length + 1;
+  const dataStart = pathRegionOffset + pathRegionSize;
 
+  // 文件表 + 计算各文件数据偏移
+  const entriesBuf = Buffer.alloc(fileTableSize);
+  let off = dataStart;
+  let totalUncompressed = 0;
+  entries.forEach((e, i) => {
+    const pb = pathBytesList[i];
+    entriesBuf.writeUInt32LE(off, i * 16 + 0);            // file_offset
+    entriesBuf.writeUInt32LE(e.payload.length, i * 16 + 4); // file_size
+    entriesBuf.writeUInt32LE(e.payload.length, i * 16 + 8); // original_size
+    entriesBuf.writeUInt16LE(pb.length, i * 16 + 12);     // path_len（不含 null）
+    entriesBuf.writeUInt8(0, i * 16 + 14);                // compress_type = 0 (store)
+    entriesBuf.writeUInt8(0, i * 16 + 15);                // reserved
+    off += e.payload.length;
+    totalUncompressed += e.payload.length;
+  });
+
+  // ---- Header ----
   const header = Buffer.alloc(64);
   header.write('NUP!', 0, 'ascii');            // magic（修正后）
   header.writeUInt16LE(1, 4);                  // version
@@ -221,17 +240,21 @@ function packNup(srcRel, payloadBuf, pkgName) {
   header.writeUInt32LE(manifestOffset, 8);     // manifest_offset
   header.writeUInt32LE(manifestLen, 12);       // manifest_len
   header.writeUInt32LE(fileTableOffset, 16);   // file_table_offset
-  header.writeUInt16LE(1, 20);                 // file_count
+  header.writeUInt16LE(entries.length, 20);    // file_count
   header.writeUInt16LE(0, 22);                 // reserved1
-  header.writeUInt32LE(payloadBuf.length, 24); // total_uncompressed
+  header.writeUInt32LE(totalUncompressed, 24); // total_uncompressed
   header.writeUInt32LE(0, 28);                 // signature_offset = 0
   header.writeUInt32LE(0, 32);                 // signature_len = 0
   const nameBuf = Buffer.alloc(28);            // package_name（草案 28 字节）
   nameBuf.write(pkgName.slice(0, 28), 0, 'utf8');
   nameBuf.copy(header, 36);
 
-  const pathRegion = Buffer.concat([pathBytes, Buffer.from([0])]);
-  return Buffer.concat([header, manifestBuf, entry, pathRegion, payloadBuf]);
+  // 路径区
+  const pathParts = [];
+  for (const pb of pathBytesList) pathParts.push(pb, Buffer.from([0]));
+  const pathRegion = Buffer.concat(pathParts);
+
+  return Buffer.concat([header, manifestBuf, entriesBuf, pathRegion, ...entries.map((e) => e.payload)]);
 }
 
 function inspectNup(buf) {
@@ -342,23 +365,55 @@ const server = http.createServer(async (req, res) => {
 
     if (p === '/api/pack-nup' && req.method === 'POST') {
       const body = await readBody(req);
-      const rel = body.path || '';
       const st = toolStatus();
       if (!st.nuomi || !st.nucutil) return sendJSON(res, 500, { ok: false, error: '工具链不完整（需要 nuomi.exe 与 nucutil.exe）' });
-      const srcAbs = safeResolve(rel);
-      if (!fs.existsSync(srcAbs)) return sendJSON(res, 404, { ok: false, error: '请先保存文件' });
-      const nucOut = srcAbs.replace(/\.nuomi$/i, '.nuc');
-      const c1 = spawnSync(NUOMI_EXE, ['-c', srcAbs, '-o', nucOut], { cwd: WORKSPACE, encoding: 'utf8', timeout: 20000, maxBuffer: 8e6 });
-      if (c1.status !== 0) return sendJSON(res, 200, { ok: false, stage: 'compile', compile: { out: (c1.stdout || ''), err: (c1.stderr || ''), code: c1.status } });
-      const payload = fs.readFileSync(nucOut);
-      const pkgName = path.basename(rel, '.nuomi');
-      const nupBuf = packNup(rel, payload, pkgName);
-      const nupRel = rel.replace(/\.nuomi$/i, '.nup');
+      // 支持多文件：body.files 为相对路径数组；兼容旧的单文件 body.path
+      const rels = (Array.isArray(body.files) && body.files.length) ? body.files
+                 : (body.path ? [body.path] : []);
+      if (!rels.length) return sendJSON(res, 400, { ok: false, error: '未指定要打包的文件' });
+
+      const entries = [];
+      for (const rel of rels) {
+        const srcAbs = safeResolve(rel);
+        if (!fs.existsSync(srcAbs)) return sendJSON(res, 404, { ok: false, error: '找不到文件：' + rel });
+        const nucOut = srcAbs.replace(/\.nuomi$/i, '.nuc');
+        const c1 = spawnSync(NUOMI_EXE, ['-c', srcAbs, '-o', nucOut], { cwd: WORKSPACE, encoding: 'utf8', timeout: 20000, maxBuffer: 8e6 });
+        if (c1.status !== 0) return sendJSON(res, 200, { ok: false, stage: 'compile', file: rel, compile: { out: (c1.stdout || ''), err: (c1.stderr || ''), code: c1.status } });
+        const payload = fs.readFileSync(nucOut);
+        const pathStr = rel.replace(/\.nuomi$/i, '.nuc');
+        entries.push({ pathStr, payload });
+      }
+
+      const pkgName = (body.name && String(body.name).trim()) || path.basename(rels[0], '.nuomi');
+      const nupBuf = packNup(entries, pkgName);
+      const safeName = pkgName.replace(/[^\w.-]/g, '_').slice(0, 40) || 'package';
+      const nupRel = safeName + '.nup';
       fs.writeFileSync(safeResolve(nupRel), nupBuf);
       return sendJSON(res, 200, {
-        ok: true, path: nupRel, size: nupBuf.length,
+        ok: true, path: nupRel, size: nupBuf.length, fileCount: entries.length,
         note: '预览版：采用 64 字节草案头部 + 正确魔数 NUP!、store-only、未签名。NUP 规范 P0（header 64/88、魔数字节序）待 liam 修复定稿后将启用校验与签名。'
       });
+    }
+
+    if (p === '/api/open-folder' && req.method === 'POST') {
+      const body = await readBody(req);
+      const rel = body.path || '';
+      try {
+        const abs = rel ? safeResolve(rel) : WORKSPACE;
+        const dir = (fs.existsSync(abs) && fs.statSync(abs).isDirectory()) ? abs : path.dirname(abs);
+        if (!fs.existsSync(dir)) return sendJSON(res, 404, { ok: false, error: '目录不存在' });
+        const dq = '"' + dir.replace(/\//g, '\\') + '"';
+        if (process.platform === 'win32') {
+          require('child_process').exec('cmd /c start "" ' + dq);
+        } else if (process.platform === 'darwin') {
+          require('child_process').exec('open ' + dq);
+        } else {
+          require('child_process').exec('xdg-open ' + dq);
+        }
+        return sendJSON(res, 200, { ok: true, dir });
+      } catch (e) {
+        return sendJSON(res, 500, { ok: false, error: String(e.message || e) });
+      }
     }
 
     if (p === '/api/inspect-nup' && req.method === 'POST') {
