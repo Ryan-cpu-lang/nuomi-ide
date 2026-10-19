@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🍡 Nuomi IDE — 糯米语言集成开发环境</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body data-theme="dark">
+  <header class="topbar">
+    <div class="brand">🍡 <span>Nuomi IDE</span> <em>糯米语言</em></div>
+    <div class="menu">
+      <button id="btnNew" title="新建文件">＋ 新建</button>
+      <button id="btnSave" title="保存 (Ctrl+S)">💾 保存</button>
+      <button id="btnSaveAs" title="另存为">⤓ 另存为</button>
+      <span class="sep"></span>
+      <button id="btnRun" class="run" title="解释器运行 (F5)">▶ 运行</button>
+      <button id="btnCompile" class="run2" title="编译为 NUC 并运行">⚙ 编译运行</button>
+      <span class="sep"></span>
+      <button id="btnTheme" title="切换主题">🌓 主题</button>
+      <button id="btnReset" title="重启 REPL">↻ REPL</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <div class="sidebar-head">📁 资源管理器</div>
+      <div id="tree" class="tree"></div>
+    </aside>
+
+    <section class="editor-wrap">
+      <div class="tabs">
+        <div id="tabName" class="tab active">未命名</div>
+        <div id="dirtyDot" class="dirty" hidden>●</div>
+      </div>
+      <div class="editor-area">
+        <div id="gutter" class="gutter"></div>
+        <div class="code-col">
+          <pre id="highlight" class="highlight" aria-hidden="true"><code></code></pre>
+          <textarea id="code" class="code" spellcheck="false" autocomplete="off" autocapitalize="off" wrap="off"></textarea>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <section class="bottom">
+    <div class="bottom-tabs">
+      <button class="btab active" data-tab="output">▣ 输出</button>
+      <button class="btab" data-tab="repl">›_ REPL</button>
+      <div class="grow"></div>
+      <button id="btnClearOut" class="mini">清空</button>
+    </div>
+    <div class="panel" id="panel-output">
+      <pre id="output" class="console"></pre>
+    </div>
+    <div class="panel" id="panel-repl" hidden>
+      <div id="replLog" class="repl-log"></div>
+      <div class="repl-input-row">
+        <span class="repl-prompt">nuomi&gt;</span>
+        <input id="replInput" class="repl-input" placeholder="输入表达式回车求值，例如 (+ 1 2)  或  (define (sq x) (* x x))" autocomplete="off">
+      </div>
+    </div>
+  </section>
+
+  <footer class="statusbar">
+    <span id="stFile">未命名</span>
+    <span id="stPos">行 1, 列 1</span>
+    <span id="stVer">—</span>
+    <span class="grow"></span>
+    <span id="stMsg">就绪</span>
+  </footer>
+
+<script src="/app.js"></script>
+</body>
+</html>

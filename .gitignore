@@ -1,0 +1,12 @@
+# 运行时工作区（首次启动自动预载示例，不入库）
+workspace/
+.run/
+
+# 可选：把工具链放本目录时排除
+toolchain/
+
+# 日志 / 系统
+*.log
+node_modules/
+.DS_Store
+Thumbs.db
