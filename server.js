@@ -182,6 +182,94 @@ function serveStatic(req, res, urlPath) {
   });
 }
 
+// ---------- NUP 打包（草案预览版） ----------
+// ⚠ 说明：NUP 规范当前存在两个 P0 问题（header 64 vs 88、魔数字节序反了），
+// 此处按「核对清单建议的修正草案」实现：64 字节头部 + 正确魔数 "NUP!"(0x2150554E) +
+// store-only（不压缩、不签名）。等 liam 修复 P0 定稿后，本函数应同步对齐正式规范。
+function packNup(srcRel, payloadBuf, pkgName) {
+  const pathStr = srcRel.replace(/\.nuomi$/i, '.nuc');
+  const pathBytes = Buffer.from(pathStr, 'utf8');
+  const manifest =
+    '[Package]\n' +
+    'name=' + pkgName + '\n' +
+    'version=1.0\n' +
+    'entry=' + pathStr + '\n' +
+    '[Files]\n' +
+    pathStr + '=' + pathStr + '\n';
+  const manifestBuf = Buffer.from(manifest, 'utf8');
+
+  const headerSize = 64;
+  const manifestOffset = headerSize;
+  const manifestLen = manifestBuf.length;
+  const fileTableOffset = manifestOffset + manifestLen;
+  const fileTableSize = 16;                  // 固定 1 个条目
+  const pathRegionOffset = fileTableOffset + fileTableSize;
+  const dataOffset = pathRegionOffset + pathBytes.length + 1; // +1 = null 结尾
+
+  const entry = Buffer.alloc(16);
+  entry.writeUInt32LE(dataOffset, 0);          // file_offset
+  entry.writeUInt32LE(payloadBuf.length, 4);   // file_size
+  entry.writeUInt32LE(payloadBuf.length, 8);   // original_size
+  entry.writeUInt16LE(pathBytes.length, 12);   // path_len（不含 null）
+  entry.writeUInt8(0, 14);                     // compress_type = 0 (store)
+  entry.writeUInt8(0, 15);                     // reserved
+
+  const header = Buffer.alloc(64);
+  header.write('NUP!', 0, 'ascii');            // magic（修正后）
+  header.writeUInt16LE(1, 4);                  // version
+  header.writeUInt16LE(0, 6);                  // flags = store
+  header.writeUInt32LE(manifestOffset, 8);     // manifest_offset
+  header.writeUInt32LE(manifestLen, 12);       // manifest_len
+  header.writeUInt32LE(fileTableOffset, 16);   // file_table_offset
+  header.writeUInt16LE(1, 20);                 // file_count
+  header.writeUInt16LE(0, 22);                 // reserved1
+  header.writeUInt32LE(payloadBuf.length, 24); // total_uncompressed
+  header.writeUInt32LE(0, 28);                 // signature_offset = 0
+  header.writeUInt32LE(0, 32);                 // signature_len = 0
+  const nameBuf = Buffer.alloc(28);            // package_name（草案 28 字节）
+  nameBuf.write(pkgName.slice(0, 28), 0, 'utf8');
+  nameBuf.copy(header, 36);
+
+  const pathRegion = Buffer.concat([pathBytes, Buffer.from([0])]);
+  return Buffer.concat([header, manifestBuf, entry, pathRegion, payloadBuf]);
+}
+
+function inspectNup(buf) {
+  if (buf.toString('ascii', 0, 4) !== 'NUP!') throw new Error('魔数错误：不是 NUP! 文件');
+  const version = buf.readUInt16LE(4);
+  const flags = buf.readUInt16LE(6);
+  const manifestOffset = buf.readUInt32LE(8);
+  const manifestLen = buf.readUInt32LE(12);
+  const fileTableOffset = buf.readUInt32LE(16);
+  const fileCount = buf.readUInt16LE(20);
+  const totalUncompressed = buf.readUInt32LE(24);
+  const sigOffset = buf.readUInt32LE(28);
+  const sigLen = buf.readUInt32LE(32);
+  const packageName = buf.toString('utf8', 36, 64).replace(/\0+$/, '');
+  const manifest = buf.toString('utf8', manifestOffset, manifestOffset + manifestLen);
+  const entries = [];
+  let pathCursor = fileTableOffset + fileCount * 16;
+  for (let i = 0; i < fileCount; i++) {
+    const base = fileTableOffset + i * 16;
+    const fileOffset = buf.readUInt32LE(base);
+    const fileSize = buf.readUInt32LE(base + 4);
+    const originalSize = buf.readUInt32LE(base + 8);
+    const pathLen = buf.readUInt16LE(base + 12);
+    const compressType = buf.readUInt8(base + 14);
+    const pathStr = buf.toString('utf8', pathCursor, pathCursor + pathLen);
+    pathCursor += pathLen + 1;
+    entries.push({
+      fileOffset, fileSize, originalSize, pathStr, compressType,
+      dataValid: fileOffset + fileSize <= buf.length
+    });
+  }
+  return {
+    magic: 'NUP!', version, flags, manifestOffset, manifestLen,
+    fileTableOffset, fileCount, totalUncompressed, sigOffset, sigLen,
+    packageName, manifest, entries, fileSize: buf.length
+  };
+}
+
 // ---------- 路由 ----------
 const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://localhost');
@@ -250,6 +338,39 @@ const server = http.createServer(async (req, res) => {
       if (repl && !repl.killed) repl.kill();
       repl = null; replReady = false;
       return sendJSON(res, 200, { ok: true });
+    }
+
+    if (p === '/api/pack-nup' && req.method === 'POST') {
+      const body = await readBody(req);
+      const rel = body.path || '';
+      const st = toolStatus();
+      if (!st.nuomi || !st.nucutil) return sendJSON(res, 500, { ok: false, error: '工具链不完整（需要 nuomi.exe 与 nucutil.exe）' });
+      const srcAbs = safeResolve(rel);
+      if (!fs.existsSync(srcAbs)) return sendJSON(res, 404, { ok: false, error: '请先保存文件' });
+      const nucOut = srcAbs.replace(/\.nuomi$/i, '.nuc');
+      const c1 = spawnSync(NUOMI_EXE, ['-c', srcAbs, '-o', nucOut], { cwd: WORKSPACE, encoding: 'utf8', timeout: 20000, maxBuffer: 8e6 });
+      if (c1.status !== 0) return sendJSON(res, 200, { ok: false, stage: 'compile', compile: { out: (c1.stdout || ''), err: (c1.stderr || ''), code: c1.status } });
+      const payload = fs.readFileSync(nucOut);
+      const pkgName = path.basename(rel, '.nuomi');
+      const nupBuf = packNup(rel, payload, pkgName);
+      const nupRel = rel.replace(/\.nuomi$/i, '.nup');
+      fs.writeFileSync(safeResolve(nupRel), nupBuf);
+      return sendJSON(res, 200, {
+        ok: true, path: nupRel, size: nupBuf.length,
+        note: '预览版：采用 64 字节草案头部 + 正确魔数 NUP!、store-only、未签名。NUP 规范 P0（header 64/88、魔数字节序）待 liam 修复定稿后将启用校验与签名。'
+      });
+    }
+
+    if (p === '/api/inspect-nup' && req.method === 'POST') {
+      const body = await readBody(req);
+      const rel = body.path || '';
+      const abs = safeResolve(rel);
+      if (!fs.existsSync(abs)) return sendJSON(res, 404, { ok: false, error: '文件不存在' });
+      try {
+        return sendJSON(res, 200, { ok: true, info: inspectNup(fs.readFileSync(abs)) });
+      } catch (e) {
+        return sendJSON(res, 200, { ok: false, error: String(e.message || e) });
+      }
     }
 
     if (req.method === 'GET') return serveStatic(req, res, p);

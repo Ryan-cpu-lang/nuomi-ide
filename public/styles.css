@@ -55,6 +55,9 @@ body {
 .menu button:hover { border-color: var(--accent); }
 .menu button.run { background: var(--accent); color: #1a1a1a; font-weight: 600; border-color: var(--accent); }
 .menu button.run2 { background: var(--accent2); color: #0d1f1b; font-weight: 600; border-color: var(--accent2); }
+.menu button.run3 { background: #6a5acd; color: #fff; font-weight: 600; border-color: #6a5acd; }
+.menu button.run3:hover { background: #7d6fe0; }
+.console .warn { color: #e0c060; background: rgba(224,192,96,0.08); display: block; padding: 4px 6px; border-left: 3px solid #e0c060; margin: 4px 0; white-space: pre-wrap; }
 .menu .sep { width: 1px; height: 20px; background: var(--border); margin: 0 2px; }
 
 /* 主布局 */

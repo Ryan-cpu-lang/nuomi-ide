@@ -218,6 +218,55 @@ function renderRun(r, label) {
   return h;
 }
 
+// ---------- 导出 .nup（预览版） ----------
+async function packNup() {
+  if (!state.path) { if (!await saveFile(true)) return; }
+  else if (state.dirty) await saveFile(false);
+  if (state.busy) return;
+  state.busy = true; $('btnPack').disabled = true;
+  setStatus('正在打包 .nup…'); showPanel('output');
+  try {
+    const r = await api('/api/pack-nup', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: state.path })
+    });
+    if (!r.ok) {
+      let html = '<span class="err">打包失败：' + esc(r.error || '') + '</span>\n';
+      if (r.compile) html += renderRun(r.compile, 'compile');
+      outputEl.innerHTML = html;
+      setStatus('打包失败', true);
+    } else {
+      const ins = await api('/api/inspect-nup', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: r.path })
+      });
+      let html = '📦 <b>已导出 ' + esc(r.path) + '（' + r.size + ' 字节）</b>\n';
+      html += '<span class="warn">⚠ ' + esc(r.note) + '</span>\n\n';
+      if (ins.ok) {
+        const i = ins.info;
+        html += '校验回读：\n';
+        html += '  魔数: ' + i.magic + '\n';
+        html += '  包名: ' + esc(i.packageName) + '\n';
+        html += '  版本: ' + i.version + '  标志(store=0): ' + i.flags + '\n';
+        html += '  文件数: ' + i.fileCount + '  总大小: ' + i.totalUncompressed + ' B\n';
+        for (const e of i.entries) {
+          html += '    • ' + esc(e.pathStr) + '  (' + e.fileSize + ' B, ' + (e.dataValid ? '数据完整' : '数据越界') + ')\n';
+        }
+        html += '\n  Manifest:\n' + escapeHtml(i.manifest);
+      } else {
+        html += '<span class="err">回读失败：' + esc(ins.error) + '</span>\n';
+      }
+      outputEl.innerHTML = html;
+      setStatus('已导出 ' + r.path);
+    }
+  } catch (e) {
+    outputEl.innerHTML = '<span class="err">请求错误：' + esc(String(e)) + '</span>';
+    setStatus('出错', true);
+  } finally {
+    state.busy = false; $('btnPack').disabled = false;
+  }
+}
+
 // ---------- 输出/REPL 面板 ----------
 function showPanel(which) {
   document.getElementById('panel-output').hidden = which !== 'output';
@@ -280,6 +329,7 @@ $('btnSave').addEventListener('click', () => saveFile(false));
 $('btnSaveAs').addEventListener('click', () => saveFile(true));
 $('btnRun').addEventListener('click', () => run('interpret'));
 $('btnCompile').addEventListener('click', () => run('compile'));
+$('btnPack').addEventListener('click', packNup);
 $('btnTheme').addEventListener('click', () => {
   const b = document.body;
   b.dataset.theme = b.dataset.theme === 'dark' ? 'light' : 'dark';

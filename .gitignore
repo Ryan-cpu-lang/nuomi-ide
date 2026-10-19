@@ -10,3 +10,6 @@ toolchain/
 node_modules/
 .DS_Store
 Thumbs.db
+
+# 机器相关的桌面快捷方式（绝对路径，不入库）
+*.lnk
