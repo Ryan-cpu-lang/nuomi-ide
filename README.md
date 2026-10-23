@@ -39,7 +39,7 @@ PyCharm 风格的糯米语言（Nuomi）桌面 IDE：**双击启动、零安装�
 | 字段 | 含义 | 默认 |
 |------|------|------|
 | `port` | 本地服务端口 | `7177` |
-| `nuomi_home` | 工具链目录（含 `nuomi.exe`/`nucutil.exe`），相对本仓库根目录 | `../Nuomi` |
+| `nuomi_home` | 工具链目录（含 `nuomi.exe`/`nucutil.exe`），相对本仓库根目录 | `../mochi`（按本地目录名调整；若克隆为 `Nuomi` 则填 `../Nuomi`） |
 | `workspace` | 工作区目录（用户文件存放处），相对本仓库根目录 | `workspace` |
 
 > 环境变量 `NUOMI_HOME` 优先级高于配置文件；手动启动时可临时覆盖：
